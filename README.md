@@ -32,3 +32,20 @@
 * 如果该JS**过于复杂**或**使用了(我)不常用的语法**，可能导致解密失败，如遇到此类情况欢迎提出。
 * 由于使用了AST，直接对语法树进行操作，可能导致代码与实际不符，结果仅供参考，如遇解密出错情况欢迎提出。
     + 提示：结果的正确性随操作步骤叠加而逐渐降低
+
+
+## 使用方法
+
+1. 在 [decryptor.js](decryptor.js) 的常量 FILE_NAME 中填写需解密的脚本路径。
+2. 运行 [decryptor.js](decryptor.js) 。
+
+
+## 输出结果
+
+> 每一解密步骤完成后，解密器都会输出一个结果文件。
+
+> 您可以根据您的**需求**从以下版本中选择一个作为最终解密结果。
+
+* clear_encrypt_str.js：解除全局字符加密
+* clear_encrypt_operate.js：解除运算及调用加密、清理死代码(if-else)
+* clear_function_execution_step_confusion.js：去除函数执行步骤混淆
