@@ -348,7 +348,7 @@ function clearEncryptStrCode(codeStr) {
             return node
         }
     })
-    writeJs(escodegen.generate(ast), CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
+    writeJs(escodegen.generate(changeObjectFunctionCall(ast)), CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
     console.log(">>>>>>>>>>>>>>>>>>>>>>>清除加密字符串结束,共计", count, "处!")
     return {ast, vmContext}
 }
@@ -531,7 +531,7 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
         `Bool混淆:`, boolCount, `处,`,
         `If不可达代码块:`, ifCount, `处,`
     )
-    writeJs(escodegen.generate(ast), CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME)
+    writeJs(escodegen.generate(changeObjectFunctionCall(ast)), CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME)
     return ast
 }
 
@@ -606,7 +606,32 @@ function clearFunctionExecutionStepConfusion(ast) {
         }
     })
     console.log(">>>>>>>>>>>>>>>>>>>>>>>清除函数执行步骤混淆结束,共计替换", count, "处!")
-    writeJs(escodegen.generate(ast), CLEAR_FUNCTION_EXECUTION_STEP_CONFUSION_OUTPUT_FILE_NAME)
+    writeJs(escodegen.generate(changeObjectFunctionCall(ast)), CLEAR_FUNCTION_EXECUTION_STEP_CONFUSION_OUTPUT_FILE_NAME)
+    return ast
+}
+
+/**
+ * 修改对象属性方法调用写法 A['a'] ===> A.a
+ * 此操作会拷贝AST树
+ * @param ast AST
+ * @return Node 处理结果
+ */
+function changeObjectFunctionCall(ast) {
+    ast = JSON.parse(JSON.stringify(ast))
+    estraverse.replace(ast, {
+        leave(node) {
+            if (node.type === "MemberExpression") {
+                let pt = node.property
+                if (pt && pt.type === "Literal" && typeof pt.value === "string") {
+                    node.property = {
+                        "type": "Identifier",
+                        "name": pt.value
+                    }
+                    node.computed = false
+                }
+            }
+        }
+    })
     return ast
 }
 
