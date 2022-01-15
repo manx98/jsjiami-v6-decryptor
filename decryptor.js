@@ -1,50 +1,28 @@
-let vm = require("vm")
-let fs = require("fs")
-// let FILE_NAME = "decryptString.js"
-// let FILE_NAME = "sample/simple01.js"
-// let FILE_NAME = "sample/t01.js"
-let FILE_NAME = "sample/md5.js"
-let acorn = require("acorn")
-let escodegen = require("escodegen")
-let esprima = require("esprima")
-let estraverse = require("estraverse")
-let {builders, namedTypes} = require("ast-types")
-let code_context = fs.readFileSync(FILE_NAME).toString()
-
-function writeJson(data, path) {
-    path = path ? path : "out.json"
-    fs.writeFileSync(path, JSON.stringify(data, null, 2))
-}
-
 function writeJs(data, path) {
     path = path ? path : "out.js"
     fs.writeFileSync(path, data)
 }
 
-function replaceEncryptNode(value, node, parent) {
-    switch (parent.type) {
-        case "AssignmentExpression": {
-            if (parent.left.type === "CallExpression" && parent.left.callee.start === node.start) {
-                parent.left = builders.literal(value)
-            } else if (parent.right.type === "CallExpression" && parent.right.callee.start === node.start) {
-                parent.right = builders.literal(value)
-            } else {
-                console.log("不支持的表达式类型:", parent)
-                throw new Error("不支持的表达式类型!")
-            }
-        }
-            break;
-        case "MemberExpression": {
-            parent.property = builders.literal(value)
-        }
-            break;
-        default: {
-            console.log("不支持的表达式类型:", parent)
-            throw new Error("不支持的表达式类型!")
-        }
-    }
+/**
+ * 通过父级Key和当前属性值获取操作映射
+ * @param operateMap 操作映射表
+ * @param key 父级key
+ * @param propertyValue 属性值
+ */
+function getOperateFromMap(operateMap, key, propertyValue) {
+    return operateMap[key + "/" + JSON.stringify(propertyValue)]
 }
 
+/**
+ * 通过父级Key和当前属性值设置操作映射
+ * @param operateMap 操作映射表
+ * @param key 父级key
+ * @param propertyValue 属性值
+ * @param type 类型
+ */
+function setOperateToMap(operateMap, key, propertyValue, type) {
+    setAndCheck(operateMap, key + "/" + JSON.stringify(propertyValue), type)
+}
 
 /**
  * 评估函数节点是否是基础函数操作
@@ -98,7 +76,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                         let property = callee.property
                         let object = callee.object
                         if (object.type === "Identifier" && property.type === "Literal") {
-                            return parentVariableMap[object.name + '_' + property.raw]
+                            return getOperateFromMap(parentVariableMap, object.name, property.value)
                         }
                     } else if (callee.type === "Identifier") {
                         let params = functionNode.params
@@ -111,7 +89,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                                 for (let arg of argument.arguments) {
                                     if (arg.type === "Identifier") {
                                         if (!names.has(arg.name)) {
-                                            return null
+                                            return
                                         }
                                     }
                                 }
@@ -128,7 +106,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                 if (body.argument) {
                     return {
                         type: "字面量",
-                        value: body.argument.value
+                        value: eval(body.argument.raw)
                     }
                 } else {
                     return {
@@ -141,7 +119,6 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
             }
         }
     }
-    return null
 }
 
 function setAndCheck(o, k, v) {
@@ -159,22 +136,57 @@ function setAndCheck(o, k, v) {
 }
 
 /**
- * 解析基础连续取反
+ * 取反操作解析
  * @param unaryExpressionNode
- * @return {boolean}
+ * @return {boolean} 失败返回undefined
  */
 function unaryExpressionComputed(unaryExpressionNode) {
-    let r = unaryExpressionNode.argument
-    if (r.type === "UnaryExpression") {
-        let res = unaryExpressionComputed(r)
+    if (unaryExpressionNode.type === "UnaryExpression") {
+        let res = unaryExpressionComputed(unaryExpressionNode.argument)
         if (res !== undefined) {
             return !res
         }
     }
-    if (r.type === "ArrayExpression" && r.elements.length === 0) {
+    if (unaryExpressionNode.type === "ArrayExpression") {
         return true
     }
-    console.log("不支持的UnaryExpression表达", escodegen.generate(r))
+    if (unaryExpressionNode.type === "Literal") {
+        return unaryExpressionNode.value
+    }
+    // console.log("不支持的UnaryExpression表达", escodegen.generate(unaryExpressionNode))
+}
+
+/**
+ * 清除无效的分支判断语句
+ */
+function clearIfStatement(ifStatementNode, vmContext) {
+    let test = ifStatementNode.test
+    let v = undefined
+    if (test.type === "BinaryExpression") {
+        let testCode = escodegen.generate({
+            "type": "CallExpression",
+            "callee": {
+                "type": "Identifier",
+                "name": "Boolean"
+            },
+            "arguments": [test],
+            "optional": false
+        })
+        try {
+            v = virtualGlobalEval(vmContext, testCode)
+        } catch (err) {
+            console.error("执行表达式失败：", escodegen.generate(test))
+        }
+    } else if (test.type === "Literal") {
+        v = Boolean(test.value)
+    }
+    if (v !== undefined) {
+        if (v) {
+            return ifStatementNode.consequent
+        } else {
+            return ifStatementNode.alternate
+        }
+    }
 }
 
 /**
@@ -183,54 +195,50 @@ function unaryExpressionComputed(unaryExpressionNode) {
  * @param decryptVariableNode 基础运算操作符函数映射对象节点
  */
 function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
-    //判断函数体第一行是不是var变量
-    if (decryptVariableNode && decryptVariableNode.type === "VariableDeclaration") {
-        //判断变量是否只有一个
-        if (decryptVariableNode.declarations && decryptVariableNode.declarations.length === 1) {
-            let declarations = decryptVariableNode.declarations[0]
-            let key = declarations.id.name
-            // 判断定义的变量是否是Object类型
-            if (declarations.init) {
-                if (declarations.init.type === "ObjectExpression") {
-                    for (let property of declarations.init.properties) {
-                        if (property.value.type === "Literal") {
-                            setAndCheck(
-                                parentVariableMap,
-                                key + '_' + property.key.raw,
-                                {
-                                    value: property.value.value,
-                                    type: "字面量"
-                                }
-                            )
-                        } else if (property.value.type === "FunctionExpression") {
-                            let v = isSimpleBaseOperateFunction(key, parentVariableMap, property.value)
-                            if (v) {
-                                setAndCheck(parentVariableMap, key + '_' + property.key.raw, v)
-                            } else {
-                                console.log("FunctionExpression 不受支持：", property)
-                            }
-                        } else if (property.value.type === "MemberExpression") {
-                            let ob = property.value.object
-                            let pt = property.value.property
-                            setAndCheck(parentVariableMap, key + '_' + property.key.raw, parentVariableMap[ob.name + '_' + pt.raw])
-                        } else if (property.value.type === "Identifier") {
-                            setAndCheck(parentVariableMap, key + '_' + property.key.raw, {
-                                type: "定义",
-                                value: property.value
-                            })
-                        } else if (property.value.type === "UnaryExpression") {
-                            //处理!![]
-                            let r = unaryExpressionComputed(property.value)
-                            if (r !== undefined) {
-                                setAndCheck(parentVariableMap, key + '_' + property.key.raw, {
-                                    type: '字面量',
-                                    value: r
-                                })
-                            }
-
+    //判断变量是否只有一个
+    if (decryptVariableNode.declarations && decryptVariableNode.declarations.length === 1) {
+        let declarations = decryptVariableNode.declarations[0]
+        let key = declarations.id.name
+        // 判断定义的变量是否是Object类型
+        if (declarations.init) {
+            if (declarations.init.type === "ObjectExpression") {
+                for (let property of declarations.init.properties) {
+                    if (property.value.type === "Literal") {
+                        setOperateToMap(parentVariableMap, key, property.key.value, {
+                            value: property.value.value,
+                            type: "字面量"
+                        })
+                    } else if (property.value.type === "FunctionExpression") {
+                        let v = isSimpleBaseOperateFunction(key, parentVariableMap, property.value)
+                        if (v) {
+                            setOperateToMap(parentVariableMap, key, property.key.value, v)
                         } else {
-                            console.log("未判断，且不受支持：", key, " ---> ", escodegen.generate(property))
+                            console.log("FunctionExpression 不受支持：", property)
                         }
+                    } else if (property.value.type === "MemberExpression") {
+                        let ob = property.value.object
+                        let pt = property.value.property
+                        setOperateToMap(
+                            parentVariableMap, key, property.key.value, getOperateFromMap(
+                                parentVariableMap, ob.name, pt.value
+                            )
+                        )
+                    } else if (property.value.type === "Identifier") {
+                        setOperateToMap(parentVariableMap, key, property.key.value, {
+                            type: "定义",
+                            value: property.value
+                        })
+                    } else if (property.value.type === "UnaryExpression" && property.value.operator === "!") {
+                        //处理!![]
+                        let r = unaryExpressionComputed(property.value)
+                        if (r !== undefined) {
+                            setOperateToMap(parentVariableMap, key, property.key.value, {
+                                type: '字面量',
+                                value: r
+                            })
+                        }
+                    } else {
+                        console.log("未判断，且不受支持：", key, " ---> ", escodegen.generate(property))
                     }
                 }
             }
@@ -239,75 +247,27 @@ function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
 }
 
 /**
- * 原地操作AST树,清除基础运算操作加密
- * @param ast AST 树
+ * 利用父级与子级节点的操作映射表差异清除无效的操作表映射变量
+ * @param blockStatementNode
+ * @param parentOperateMap
+ * @param childOperateMap
  */
-function clearBaseOperateCall(ast) {
-    let operateMap = {}
-    let operateMapStack = []
-    estraverse.replace(ast, {
-        enter(node) {
-            if (node.type === "BlockStatement") {
-                operateMapStack.push({...operateMap});
+function clearUnavailableVariableFromOperateMap(blockStatementNode, parentOperateMap, childOperateMap) {
+    let parentKeys = Object.keys(parentOperateMap)
+    let childKeys = Object.keys(childOperateMap)
+    if (parentKeys.length < childKeys.length) {
+        let oldMap = new Set(parentKeys)
+        let diffVarName = new Set()
+        childKeys.filter(x => !oldMap.has(x)).forEach(x => diffVarName.add(x.split("/")[0]))
+        estraverse.replace(blockStatementNode, {
+            leave(node) {
+                if (node.type === "VariableDeclaration" && diffVarName.has(node.declarations[0].id.name)) {
+                    this.remove()
+                }
             }
-        },
-        leave(node, parent) {
-            if (node.type === "VariableDeclaration") {
-                buildOperateMapFromVariable(operateMap, node)
-            } else if (node.computed && node.type === "MemberExpression") {
-                let object = node.object
-                let property = node.property
-                if (object && property && object.type === "Identifier" && property.type === "Literal") {
-                    let r = operateMap[object.name + "_" + property.raw]
-                    if (r && r.type === "字面量") {
-                        return builderOperateNode(r)
-                    }
-                }
-            } else if (node.type === "CallExpression") {
-                let r = clearBaseOperateCallHandler(operateMap, node)
-                if (r) {
-                    return r
-                }
-            } else if (node.type === "BlockStatement") {
-                operateMap = operateMapStack.pop()
-            }
-        }
-    })
-}
-
-
-function clearUnavailableVariable(ast) {
-
-}
-
-/**
- * 基础运算操作加密解密
- * @param parentVariableMap 父级基础运算操作符函数映射{变量名+key:{type,value}}
- * @param functionNode 函数节点
- */
-function baseOperateDecryptFunctionCheck(parentVariableMap, functionNode) {
-    let body = functionNode.body
-    for (let variableNode of body) {
-        if (variableNode.type === "VariableDeclaration") {
-            buildOperateMapFromVariable(parentVariableMap, variableNode)
-        } else if (variableNode.type === "BlockStatement" || variableNode.type === "FunctionDeclaration") {
-            estraverse.replace(variableNode, {
-                enter(node) {
-                    if (node.type === "BlockStatement") {
-                        this.skip()
-                        // console.log(node.id)
-                        return baseOperateDecryptFunctionCheck({...parentVariableMap}, node)
-                    } else if (node.type === "FunctionDeclaration") {
-                        this.skip()
-                        return baseOperateDecryptFunctionCheck({...parentVariableMap}, node.body)
-                    }
-                }
-            })
-        }
+        })
     }
-    console.log("操作映射表：", parentVariableMap)
 }
-
 
 /**
  * 转换代码为AST
@@ -334,42 +294,63 @@ function virtualGlobalEval(context, script) {
 /**
  * 查找并加载解密函数
  * @param codeStr 源码
- * @returns {{code: string, vmContext: Context, name}}
+ * @returns {{code: Node, vmContext: Context, name}}
  */
 function findStrEncryptionFunction(codeStr) {
-    let program = getAst(codeStr)['body']
+    console.log("开始解析字符串解密函数！")
+    let ast = getAst(codeStr)
+    let program = ast.body
+    program = program.filter(x => x.type !== "EmptyStatement")
     let vmContext = vm.createContext()
-    for (let i = 0; i < 3; ++i) {
-        virtualGlobalEval(vmContext, codeStr.substring(program[i].start, program[i].end))
+    if (config.vmInitScript) {
+        virtualGlobalEval(vmContext, config.vmInitScript)
     }
-    codeStr = codeStr.substring(program[2].end, codeStr.length)
+    let name = null
+    for (let i = 0; i < 3; ++i) {
+        let p = program.shift(0)
+        virtualGlobalEval(vmContext, codeStr.substring(p.start, p.end))
+        if (i === 2) {
+            if (p.type === "FunctionDeclaration") {
+                name = p.id.name
+            }
+            if (p.type === "VariableDeclaration") {
+                name = p.declarations[0].id.name
+            }
+        }
+    }
+    if (!name) {
+        throw new Error("没有找到字符串加密函数！")
+    }
+    console.log("已找到解密函数：", name)
+    ast.body = program
     return {
-        name: program[2].declarations[0].id.name,
-        code: codeStr,
+        name,
+        ast,
         vmContext
     }
 }
 
 /**
- * 操作一,解密字符串加密
- * @returns {*} 解密后的JS代码
+ * 操作一,清除加密字符串
+ * @returns {{ast, vmContext: Context}} 解密后的AST节点
  */
-function decryptStr(codeStr) {
-    let {name, code, vmContext} = findStrEncryptionFunction(codeStr)
-    let ast = getAst(code)
+function clearEncryptStrCode(codeStr) {
+    let {name, ast, vmContext} = findStrEncryptionFunction(codeStr)
+    console.log("开始清除加密字符串.....")
+    let count = 0
     estraverse.replace(ast, {
-        enter(node) {
+        leave(node) {
             if (node.type === "CallExpression" && node.callee.name === name) {
-                let o = virtualGlobalEval(vmContext, code.substring(node.start, node.end))
+                let o = virtualGlobalEval(vmContext, escodegen.generate(node))
+                count += 1
                 return builders.literal(o)
             }
             return node
         }
     })
-    code = escodegen.generate(ast)
-    writeJson(getAst(code))
-    writeJs(code, "decryptString.js")
-    return code
+    writeJs(escodegen.generate(ast), CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
+    console.log("清除加密字符串结束,共计", count, "处!")
+    return {ast, vmContext}
 }
 
 /**
@@ -380,7 +361,6 @@ function decryptStr(codeStr) {
  */
 function builderOperateNode(t, args) {
     if (t) {
-        // console.log("构建节点：", t)
         if (t.type === '字面量') {
             if (t.value === undefined) {
                 return builders.identifier("undefined")
@@ -444,39 +424,140 @@ function clearBaseOperateCallHandler(operateMap, callExpressionNode) {
                         arguments.push(arg)
                     }
                 } else {
-                    console.log("糟糕的参数:", args)
-                    throw new Error("糟糕的参数!")
+                    console.log("错误的参数,可能代码存在语法错误:", args)
+                    throw new Error("错误的参数，可能代码存在语法错误!")
                 }
             }
-            let type = operateMap[ob.name + "_" + pt.raw]
+            let type = getOperateFromMap(operateMap, ob.name, pt.value)
             if (type) {
                 return builderOperateNode(type, arguments)
             } else {
                 callExpressionNode.arguments = arguments
                 return callExpressionNode
             }
-        } else {
-            // console.log("检查失败节点:", escodegen.generate(callExpressionNode))
         }
     }
 }
 
 /**
- * 操作二, 解密基础运算加密
+ * 操作二, 清除基础运算加密以及if else不可达代码
+ * 原地操作AST树,清除基础运算操作加密
+ * @param vmContext 解密使用的Context
+ * @param ast AST 树
  */
-function decryptBaseOperateEncrypt(codeStr) {
-    let ast = getAst(codeStr);
-    clearBaseOperateCall(ast)
-    writeJs(escodegen.generate(ast), "clear.js")
-    // writeJson(operateMap, "映射.json")
-    // clearBaseOperateCall(operateMap, ast)
+function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
+    console.log("开始清除运算符加密.....")
+    let operateMap = {}
+    let operateMapStack = []
+    let literalCount = 0
+    let callCount = 0
+    let ifCount = 0
+    let boolCount = 0
+    estraverse.replace(ast, {
+        enter(node) {
+            if (node.type === "BlockStatement") {
+                //保存操作映射表状态
+                operateMapStack.push({...operateMap});
+            } else if (node.type === "VariableDeclaration") {
+                buildOperateMapFromVariable(operateMap, node)
+            }
+        },
+        leave(node) {
+            if (node.type === "UnaryExpression" && node.operator === "!") {
+                let r = unaryExpressionComputed(node)
+                if (r !== undefined) {
+                    boolCount += 1
+                    return builders.literal(r)
+                }
+            } else if (node.computed && node.type === "MemberExpression") {
+                let object = node.object
+                let property = node.property
+                if (object && property && object.type === "Identifier" && property.type === "Literal") {
+                    let r = getOperateFromMap(operateMap, object.name, property.value)
+                    if (r && r.type === "字面量") {
+                        literalCount += 1
+                        return builderOperateNode(r)
+                    }
+                }
+            } else if (node.type === "CallExpression") {
+                let r = clearBaseOperateCallHandler(operateMap, node)
+                if (r) {
+                    callCount += 1
+                    return r
+                }
+            } else if (node.type === "BlockStatement") {
+                let childOperateMap = operateMap
+                operateMap = operateMapStack.pop()
+                if (config.clearVar) {
+                    clearUnavailableVariableFromOperateMap(node, operateMap, childOperateMap)
+                }
+                return node
+            } else if (node.type === "IfStatement") {
+                if (config.clearIf) {
+                    let r = clearIfStatement(node, vmContext)
+                    if (r) {
+                        ifCount += 1
+                        return r;
+                    }
+                }
+            }
+        }
+    })
+    //用于简化重复嵌套代码块
+    estraverse.replace(ast, {
+        enter(node) {
+            if (node.type === "BlockStatement") {
+                while (node.body && node.body.length === 1 && node.body[0].type === "BlockStatement") {
+                    node = node.body[0]
+                }
+                return node
+            }
+        }
+    })
+    console.log("清除运算符加密结束,共计清除:",
+        '字面量混淆:', literalCount, '处,',
+        `调用加密:`, callCount, `处,`,
+        `Bool混淆:`, boolCount, `处,`,
+        `If不可达代码块:`, ifCount, `处,`
+    )
+    writeJs(escodegen.generate(ast), CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME)
 }
 
-// writeJson(esprima.parse(code_context))
-// decryptStr(code_context)
-decryptBaseOperateEncrypt(decryptStr(code_context))
+/**
+ * 解密代码
+ * @param codeStr 代码内容
+ */
+function decryptCode(codeStr) {
+    let {ast, vmContext} = clearEncryptStrCode(code_context)
+    clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext)
+}
 
-// let data = `let a = b(c , d)`
-// let a = getAst(data)
-// writeJson(a, "t.json")
-// fs.writeFileSync("result.json", format_context)
+let vm = require("vm")
+let fs = require("fs")
+// 加密文件路径
+let FILE_NAME = "sample/md5.js"
+// 用于存储第一步解码加密字符串结果
+let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
+// 用于存储第二步解码加密操作以及死代码结果
+// let CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME = "clear_encrypt_operate.js"
+let CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME = "clear_encrypt_operate.js"
+// let FILE_NAME = "sample/operate.js"
+let acorn = require("acorn")
+let escodegen = require("escodegen")
+let estraverse = require("estraverse")
+let {builders, namedTypes} = require("ast-types")
+let code_context = fs.readFileSync(FILE_NAME).toString()
+let config = {
+    clearIf: true,//开启清除无效if else语句
+    clearVar: true,//开启清除无效操作映射变量
+    vmInitScript: `
+    var document = {
+        domain: ''
+    }
+    var Host = ''
+    var Domain = ''
+    `// 向vm context初始化时执行的脚本,用于向环境注入变量
+}
+
+// 程序入口
+decryptCode(code_context)
