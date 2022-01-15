@@ -173,9 +173,10 @@ function clearIfStatement(ifStatementNode, vmContext) {
             "optional": false
         })
         try {
+            console.error("执行表达式：", escodegen.generate(test))
             v = virtualGlobalEval(vmContext, testCode)
         } catch (err) {
-            console.error("执行表达式失败：", escodegen.generate(test))
+            // console.error("执行表达式失败：", escodegen.generate(test))
         }
     } else if (test.type === "Literal") {
         v = Boolean(test.value)
@@ -453,7 +454,7 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
     let callCount = 0
     let ifCount = 0
     let boolCount = 0
-    estraverse.replace(ast, {
+    estraverse.traverse(ast, {
         enter(node) {
             if (node.type === "BlockStatement") {
                 //保存操作映射表状态
@@ -463,37 +464,48 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
             }
         },
         leave(node) {
-            if (node.type === "UnaryExpression" && node.operator === "!") {
-                let r = unaryExpressionComputed(node)
-                if (r !== undefined) {
-                    boolCount += 1
-                    return builders.literal(r)
-                }
-            } else if (node.computed && node.type === "MemberExpression") {
-                let object = node.object
-                let property = node.property
-                if (object && property && object.type === "Identifier" && property.type === "Literal") {
-                    let r = getOperateFromMap(operateMap, object.name, property.value)
-                    if (r && r.type === "字面量") {
-                        literalCount += 1
-                        return builderOperateNode(r)
+            if (node.type === "BlockStatement") {
+                estraverse.replace(node, {
+                    leave(node) {
+                        if (node.type === "UnaryExpression" && node.operator === "!") {
+                            let r = unaryExpressionComputed(node)
+                            if (r !== undefined) {
+                                boolCount += 1
+                                return builders.literal(r)
+                            }
+                        } else if (node.computed && node.type === "MemberExpression") {
+                            let object = node.object
+                            let property = node.property
+                            if (object && property && object.type === "Identifier" && property.type === "Literal") {
+                                let r = getOperateFromMap(operateMap, object.name, property.value)
+                                if (r && r.type === "字面量") {
+                                    literalCount += 1
+                                    return builderOperateNode(r)
+                                }
+                            }
+                        } else if (node.type === "CallExpression") {
+                            let r = clearBaseOperateCallHandler(operateMap, node)
+                            if (r) {
+                                callCount += 1
+                                return r
+                            }
+                        }
                     }
-                }
-            } else if (node.type === "CallExpression") {
-                let r = clearBaseOperateCallHandler(operateMap, node)
-                if (r) {
-                    callCount += 1
-                    return r
-                }
-            } else if (node.type === "BlockStatement") {
+                })
                 let childOperateMap = operateMap
                 operateMap = operateMapStack.pop()
                 if (config.clearVar) {
                     clearUnavailableVariableFromOperateMap(node, operateMap, childOperateMap)
                 }
                 return node
-            } else if (node.type === "IfStatement") {
-                if (config.clearIf) {
+            }
+        }
+    })
+    // 清除if else 无效判断
+    if (config.clearIf) {
+        estraverse.replace(ast, {
+            leave(node) {
+                if (node.type === "IfStatement") {
                     let r = clearIfStatement(node, vmContext)
                     if (r) {
                         ifCount += 1
@@ -501,8 +513,8 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
                     }
                 }
             }
-        }
-    })
+        })
+    }
     //用于简化重复嵌套代码块
     estraverse.replace(ast, {
         enter(node) {
