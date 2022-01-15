@@ -173,10 +173,9 @@ function clearIfStatement(ifStatementNode, vmContext) {
             "optional": false
         })
         try {
-            console.error("执行表达式：", escodegen.generate(test))
             v = virtualGlobalEval(vmContext, testCode)
         } catch (err) {
-            // console.error("执行表达式失败：", escodegen.generate(test))
+            console.error("执行表达式失败：", escodegen.generate(test))
         }
     } else if (test.type === "Literal") {
         v = Boolean(test.value)
@@ -298,7 +297,7 @@ function virtualGlobalEval(context, script) {
  * @returns {{code: Node, vmContext: Context, name}}
  */
 function findStrEncryptionFunction(codeStr) {
-    console.log("开始解析字符串解密函数！")
+    console.log("----------------------开始解析字符串解密函数----------------------")
     let ast = getAst(codeStr)
     let program = ast.body
     program = program.filter(x => x.type !== "EmptyStatement")
@@ -322,7 +321,7 @@ function findStrEncryptionFunction(codeStr) {
     if (!name) {
         throw new Error("没有找到字符串加密函数！")
     }
-    console.log("已找到解密函数：", name)
+    console.log(">>>>>>>>>>>>>>>>>>>>>>>已找到解密函数：", name)
     ast.body = program
     return {
         name,
@@ -337,7 +336,7 @@ function findStrEncryptionFunction(codeStr) {
  */
 function clearEncryptStrCode(codeStr) {
     let {name, ast, vmContext} = findStrEncryptionFunction(codeStr)
-    console.log("开始清除加密字符串.....")
+    console.log("----------------------开始清除加密字符串----------------------")
     let count = 0
     estraverse.replace(ast, {
         leave(node) {
@@ -350,7 +349,7 @@ function clearEncryptStrCode(codeStr) {
         }
     })
     writeJs(escodegen.generate(ast), CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
-    console.log("清除加密字符串结束,共计", count, "处!")
+    console.log(">>>>>>>>>>>>>>>>>>>>>>>清除加密字符串结束,共计", count, "处!")
     return {ast, vmContext}
 }
 
@@ -447,7 +446,7 @@ function clearBaseOperateCallHandler(operateMap, callExpressionNode) {
  * @param ast AST 树
  */
 function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
-    console.log("开始清除运算符加密.....")
+    console.log("----------------------开始清除运算符加密----------------------")
     let operateMap = {}
     let operateMapStack = []
     let literalCount = 0
@@ -526,13 +525,89 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
             }
         }
     })
-    console.log("清除运算符加密结束,共计清除:",
+    console.log(">>>>>>>>>>>>>>>>>>>>>>>清除运算符加密结束,共计清除:",
         '字面量混淆:', literalCount, '处,',
         `调用加密:`, callCount, `处,`,
         `Bool混淆:`, boolCount, `处,`,
         `If不可达代码块:`, ifCount, `处,`
     )
     writeJs(escodegen.generate(ast), CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME)
+    return ast
+}
+
+/**
+ * 操作三,清除函数执行步骤混淆
+ * @param ast ast树
+ * @return {{type: string, body: *[]}}
+ */
+function clearFunctionExecutionStepConfusion(ast) {
+    let count = 0
+    let regx = /[0-9|]+/
+    console.log("----------------------开始清除函数执行步骤混淆----------------------")
+    estraverse.replace(ast, {
+        leave(node) {
+            if (
+                node.type === "BlockStatement" &&
+                node.body && node.body.length === 2 &&
+                node.body[0].type === "VariableDeclaration" &&
+                node.body[1].type === "WhileStatement"
+            ) {
+                let varNodes = node.body[0]
+                if (varNodes.declarations && varNodes.declarations.length === 2) {
+                    let stepVar = varNodes.declarations[0]
+                    let choiceVar = varNodes.declarations[1]
+                    if (stepVar.type === "VariableDeclarator" && stepVar.init && stepVar.init.type === "CallExpression" && stepVar.init.callee.type === "MemberExpression") {
+                        let object = stepVar.init.callee.object
+                        let property = stepVar.init.callee.property
+                        if (
+                            object && object.type === "Literal" && regx.exec(object.value)[0] === object.value &&
+                            property && property.type === "Literal" && property.value === "split" &&
+                            stepVar.init.arguments && stepVar.init.arguments.length === 1 && stepVar.init.arguments[0].value === "|") {
+                            let whileNode = node.body[1]
+                            if (whileNode.test.type === "Literal" && whileNode.test.value) {
+                                let whileBody = whileNode.body.body
+                                if (whileBody[0].type === "SwitchStatement") {
+                                    let switchNode = whileBody[0]
+                                    let discriminant = switchNode.discriminant
+                                    if (
+                                        discriminant && discriminant.type === "MemberExpression" &&
+                                        discriminant.object && discriminant.object.type === "Identifier" && discriminant.object.name === stepVar.id.name &&
+                                        discriminant.property && discriminant.property.type === "UpdateExpression" && discriminant.property.operator === "++" &&
+                                        discriminant.property.argument.name === choiceVar.id.name
+                                    ) {
+                                        //生成调用顺序映射
+                                        let caseMap = {}
+                                        for (let caseNode of switchNode.cases) {
+                                            if (caseNode.test.type === "Literal") {
+                                                caseMap[caseNode.test.value] = caseNode.consequent.filter(x => x.type !== "ContinueStatement" && x.type !== "BreakStatement")
+                                            } else {
+                                                throw new Error("异常case表达:" + escodegen.generate(caseNode))
+                                            }
+                                        }
+                                        //重排调用顺序
+                                        let newBody = []
+                                        for (let step of object.value.split("|")) {
+                                            for (let s of caseMap[step]) {
+                                                newBody.push(s)
+                                            }
+                                        }
+                                        count += 1
+                                        return {
+                                            type: "BlockStatement",
+                                            body: newBody
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    })
+    console.log(">>>>>>>>>>>>>>>>>>>>>>>清除函数执行步骤混淆结束,共计替换", count, "处!")
+    writeJs(escodegen.generate(ast), CLEAR_FUNCTION_EXECUTION_STEP_CONFUSION_OUTPUT_FILE_NAME)
+    return ast
 }
 
 /**
@@ -542,6 +617,7 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
 function decryptCode(codeStr) {
     let {ast, vmContext} = clearEncryptStrCode(code_context)
     clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext)
+    clearFunctionExecutionStepConfusion(ast)
 }
 
 let vm = require("vm")
@@ -551,13 +627,14 @@ let FILE_NAME = "sample/md5.js"
 // 用于存储第一步解码加密字符串结果
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
 // 用于存储第二步解码加密操作以及死代码结果
-// let CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME = "clear_encrypt_operate.js"
 let CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME = "clear_encrypt_operate.js"
+//清除函数执行步骤混淆输出文件
+let CLEAR_FUNCTION_EXECUTION_STEP_CONFUSION_OUTPUT_FILE_NAME = "clear_function_execution_step_confusion.js"
 // let FILE_NAME = "sample/operate.js"
 let acorn = require("acorn")
 let escodegen = require("escodegen")
 let estraverse = require("estraverse")
-let {builders, namedTypes} = require("ast-types")
+let {builders} = require("ast-types")
 let code_context = fs.readFileSync(FILE_NAME).toString()
 let config = {
     clearIf: true,//开启清除无效if else语句
