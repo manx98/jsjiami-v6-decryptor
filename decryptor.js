@@ -623,7 +623,7 @@ function decryptCode(codeStr) {
 let vm = require("vm")
 let fs = require("fs")
 // 加密文件路径
-let FILE_NAME = "sample/md5.js"
+let FILE_NAME = "sample/jsjiami.com.v5_high.js"
 // 用于存储第一步解码加密字符串结果
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
 // 用于存储第二步解码加密操作以及死代码结果
