@@ -628,7 +628,7 @@ let FILE_NAME = "sample/md5.js"
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
 // 用于存储第二步解码加密操作以及死代码结果
 let CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME = "clear_encrypt_operate.js"
-//清除函数执行步骤混淆输出文件
+// 用于存储第二步清除函数执行步骤混淆输出文件
 let CLEAR_FUNCTION_EXECUTION_STEP_CONFUSION_OUTPUT_FILE_NAME = "clear_function_execution_step_confusion.js"
 // let FILE_NAME = "sample/operate.js"
 let acorn = require("acorn")
