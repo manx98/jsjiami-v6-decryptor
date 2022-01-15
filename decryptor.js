@@ -624,13 +624,12 @@ let vm = require("vm")
 let fs = require("fs")
 // 加密文件路径
 let FILE_NAME = "sample/jsjiami.com.v5_high.js"
-// 用于存储第一步解码加密字符串结果
+// 用于存储第一步解码加密字符串结果，可靠性高
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
-// 用于存储第二步解码加密操作以及死代码结果
+// 用于存储第二步解码加密操作以及死代码结果,可靠性低
 let CLEAR_ENCRYPT_OPERATE_OUTPUT_FILE_NAME = "clear_encrypt_operate.js"
-// 用于存储第二步清除函数执行步骤混淆输出文件
+// 用于存储第三步清除函数执行步骤混淆输出文件,与上一步相同
 let CLEAR_FUNCTION_EXECUTION_STEP_CONFUSION_OUTPUT_FILE_NAME = "clear_function_execution_step_confusion.js"
-// let FILE_NAME = "sample/operate.js"
 let acorn = require("acorn")
 let escodegen = require("escodegen")
 let estraverse = require("estraverse")
