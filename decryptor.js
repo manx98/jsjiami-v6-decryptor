@@ -64,7 +64,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                             value: argument.operator
                         }
                     } else {
-                        console.log("意外的计算表达式：", functionNode)
+                        console.warn("意外的计算表达式：", functionNode)
                     }
                 } else if (argument.type === "CallExpression") {
                     //函数表达式
@@ -99,7 +99,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                             }
                         }
                     } else {
-                        console.log("不受支持的表达式:", escodegen.generate(functionNode))
+                        console.warn("不受支持的表达式:", escodegen.generate(functionNode))
                     }
                 }
             } else if (body.left === undefined && body.right === undefined) {
@@ -115,7 +115,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                     }
                 }
             } else {
-                console.log("不受支持的表达式:", escodegen.generate(functionNode))
+                console.warn("不受支持的表达式:", escodegen.generate(functionNode))
             }
         }
     }
@@ -125,7 +125,7 @@ function setAndCheck(o, k, v) {
     let cv = o[k]
     if (v && cv) {
         if (cv.type !== v.type || cv.value !== v.value) {
-            console.log("数据已经存在：", o[k], cv)
+            console.warn("数据已经存在：", o[k], cv)
             throw new Error("数据已存在: " + k)
         }
     } else if (v) {
@@ -175,7 +175,7 @@ function clearIfStatement(ifStatementNode, vmContext) {
         try {
             v = virtualGlobalEval(vmContext, testCode)
         } catch (err) {
-            console.error("执行表达式失败：", escodegen.generate(test))
+            console.warn("执行表达式失败：", escodegen.generate(test))
         }
     } else if (test.type === "Literal") {
         v = Boolean(test.value)
@@ -213,7 +213,7 @@ function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
                         if (v) {
                             setOperateToMap(parentVariableMap, key, property.key.value, v)
                         } else {
-                            console.log("FunctionExpression 不受支持：", escodegen.generate(property), property)
+                            console.warn("FunctionExpression 不受支持：", escodegen.generate(property), property)
                         }
                     } else if (property.value.type === "MemberExpression") {
                         let ob = property.value.object
@@ -238,7 +238,7 @@ function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
                             })
                         }
                     } else {
-                        console.log("未判断，且不受支持：", key, " ---> ", escodegen.generate(property), property)
+                        console.warn("未判断，且不受支持：", key, " ---> ", escodegen.generate(property), property)
                     }
                 }
             }
@@ -341,24 +341,21 @@ function clearEncryptStrCode(codeStr) {
     estraverse.replace(ast, {
         leave(node) {
             if (node.type === 'BinaryExpression') {
-                if (node.left && node.left.type === 'Literal' && node.right && node.right.type === 'Literal') {
-                    let code = escodegen.generate(node)
-                    return builders.literal(virtualGlobalEval(vmContext, code))
+                if (node.left && node.left.type === 'Literal' && node.right && node.right.type === 'Literal' && node.operator === '+') {
+                    try {
+                        let code = escodegen.generate(node)
+                        let result = virtualGlobalEval(vmContext, code)
+                        if (typeof result === 'string') {
+                            return builders.literal(result)
+                        }
+                    } catch (e) {
+                        console.warn("无评估代码片段：", node)
+                    }
                 }
             } else if (node.type === "CallExpression" && node.callee.name === name) {
                 let o = virtualGlobalEval(vmContext, escodegen.generate(node))
                 count += 1
                 return builders.literal(o)
-            } else if (node.type === 'Property' && node.key && node.key.type === 'Literal' && node.value && node.value.type === 'BinaryExpression') {
-                let code = escodegen.generate(node.value)
-                try {
-                    let o = virtualGlobalEval(vmContext, code)
-                    if (typeof o === 'string') {
-                        node.value = builders.literal(o)
-                    }
-                } catch (e) {
-                    console.warn("尝试解析表达式失败：", code, e)
-                }
             }
             return node
         }
@@ -440,7 +437,7 @@ function clearBaseOperateCallHandler(operateMap, callExpressionNode) {
                         arguments.push(arg)
                     }
                 } else {
-                    console.log("错误的参数,可能代码存在语法错误:", args)
+                    console.warn("错误的参数,可能代码存在语法错误:", args)
                     throw new Error("错误的参数，可能代码存在语法错误!")
                 }
             }
@@ -683,7 +680,7 @@ function decryptCode(codeStr) {
 let vm = require("vm")
 let fs = require("fs")
 // 加密文件路径
-let FILE_NAME = "test.js"
+let FILE_NAME = "sample/jsjiami.com.v6_high.js"
 // 用于存储第一步解码加密字符串结果，可靠性高
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
 // 用于存储第二步解码加密操作以及死代码结果,可靠性低
