@@ -52,7 +52,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                         value: argument.value
                     }
                 }
-                if (argument.type === 'BinaryExpression') {
+                if (argument.type === 'BinaryExpression' || argument.type === 'LogicalExpression') {
                     let params = functionNode.params
                     if (
                         params.length === 2 &&
@@ -60,7 +60,7 @@ function isSimpleBaseOperateFunction(key, parentVariableMap, functionNode) {
                         argument.right.type === "Identifier" && argument.right.name === params[1].name
                     ) {
                         return {
-                            type: "运算符",
+                            type: argument.type,
                             value: argument.operator
                         }
                     } else {
@@ -213,7 +213,7 @@ function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
                         if (v) {
                             setOperateToMap(parentVariableMap, key, property.key.value, v)
                         } else {
-                            console.log("FunctionExpression 不受支持：", property)
+                            console.log("FunctionExpression 不受支持：", escodegen.generate(property), property)
                         }
                     } else if (property.value.type === "MemberExpression") {
                         let ob = property.value.object
@@ -238,7 +238,7 @@ function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
                             })
                         }
                     } else {
-                        console.log("未判断，且不受支持：", key, " ---> ", escodegen.generate(property))
+                        console.log("未判断，且不受支持：", key, " ---> ", escodegen.generate(property), property)
                     }
                 }
             }
@@ -340,17 +340,33 @@ function clearEncryptStrCode(codeStr) {
     let count = 0
     estraverse.replace(ast, {
         leave(node) {
-            if (node.type === "CallExpression" && node.callee.name === name) {
+            if (node.type === 'BinaryExpression') {
+                if (node.left && node.left.type === 'Literal' && node.right && node.right.type === 'Literal') {
+                    let code = escodegen.generate(node)
+                    return builders.literal(virtualGlobalEval(vmContext, code))
+                }
+            } else if (node.type === "CallExpression" && node.callee.name === name) {
                 let o = virtualGlobalEval(vmContext, escodegen.generate(node))
                 count += 1
                 return builders.literal(o)
+            } else if (node.type === 'Property' && node.key && node.key.type === 'Literal' && node.value && node.value.type === 'BinaryExpression') {
+                let code = escodegen.generate(node.value)
+                try {
+                    let o = virtualGlobalEval(vmContext, code)
+                    if (typeof o === 'string') {
+                        node.value = builders.literal(o)
+                    }
+                } catch (e) {
+                    console.warn("尝试解析表达式失败：", code, e)
+                }
             }
             return node
         }
     })
-    writeJs(escodegen.generate(changeObjectFunctionCall(ast)), CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
+    codeStr = escodegen.generate(changeObjectFunctionCall(ast))
+    writeJs(codeStr, CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
     console.log(">>>>>>>>>>>>>>>>>>>>>>>清除加密字符串结束,共计", count, "处!")
-    return {ast, vmContext}
+    return {ast, vmContext, code: codeStr}
 }
 
 /**
@@ -366,10 +382,10 @@ function builderOperateNode(t, args) {
                 return builders.identifier("undefined")
             }
             return builders.literal(t.value)
-        } else if (t.type === "运算符") {
+        } else if (t.type === "BinaryExpression" || t.type === 'LogicalExpression') {
             if (args) {
                 return {
-                    type: "BinaryExpression",
+                    type: t.type,
                     left: args[0],
                     right: args[1],
                     operator: t.value
@@ -510,21 +526,26 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
                         ifCount += 1
                         return r;
                     }
+                } else if (node.type === "BlockStatement") {
+                    while (node.body && node.body.length === 1 && node.body[0].type === "BlockStatement") {
+                        node = node.body[0]
+                    }
+                    return node
                 }
             }
         })
     }
     //用于简化重复嵌套代码块
-    estraverse.replace(ast, {
-        enter(node) {
-            if (node.type === "BlockStatement") {
-                while (node.body && node.body.length === 1 && node.body[0].type === "BlockStatement") {
-                    node = node.body[0]
-                }
-                return node
-            }
-        }
-    })
+    // estraverse.replace(ast, {
+    //     enter(node) {
+    //         if (node.type === "BlockStatement") {
+    //             while (node.body && node.body.length === 1 && node.body[0].type === "BlockStatement") {
+    //                 node = node.body[0]
+    //             }
+    //             return node
+    //         }
+    //     }
+    // })
     console.log(">>>>>>>>>>>>>>>>>>>>>>>清除运算符加密结束,共计清除:",
         '字面量混淆:', literalCount, '处,',
         `调用加密:`, callCount, `处,`,
@@ -546,56 +567,70 @@ function clearFunctionExecutionStepConfusion(ast) {
     console.log("----------------------开始清除函数执行步骤混淆----------------------")
     estraverse.replace(ast, {
         leave(node) {
-            if (
-                node.type === "BlockStatement" &&
-                node.body && node.body.length === 2 &&
-                node.body[0].type === "VariableDeclaration" &&
-                node.body[1].type === "WhileStatement"
-            ) {
-                let varNodes = node.body[0]
-                if (varNodes.declarations && varNodes.declarations.length === 2) {
-                    let stepVar = varNodes.declarations[0]
-                    let choiceVar = varNodes.declarations[1]
-                    if (stepVar.type === "VariableDeclarator" && stepVar.init && stepVar.init.type === "CallExpression" && stepVar.init.callee.type === "MemberExpression") {
-                        let object = stepVar.init.callee.object
+            if (node.type === "BlockStatement" && node.body) {
+                let stepVar;
+                let choiceVar;
+                let object;
+                let whileNode;
+                if (node.body.length === 3 && node.body[0].type === "VariableDeclaration" && node.body[1].type === "VariableDeclaration" && node.body[2].type === "WhileStatement") {
+                    stepVar = node.body[0].declarations[0]
+                    choiceVar = node.body[1].declarations[0]
+                    object = stepVar.init.callee.object
+                    let property = stepVar.init.callee.property
+                    if (
+                        object && object.type === "Literal" && regx.exec(object.value)[0] === object.value &&
+                        property && property.type === "Literal" && property.value === "split" &&
+                        stepVar.init.arguments && stepVar.init.arguments.length === 1 && stepVar.init.arguments[0].value === "|") {
+                        whileNode = node.body[2]
+                    }
+                } else if (node.body.length === 2 && node.body[0].type === "VariableDeclaration" && node.body[1].type === "WhileStatement") {
+                    let varNodes = node.body[0]
+                    if (varNodes.declarations && varNodes.declarations.length === 2) {
+                        stepVar = varNodes.declarations[0]
+                        choiceVar = varNodes.declarations[1]
+                        object = stepVar.init.callee.object
                         let property = stepVar.init.callee.property
                         if (
                             object && object.type === "Literal" && regx.exec(object.value)[0] === object.value &&
                             property && property.type === "Literal" && property.value === "split" &&
                             stepVar.init.arguments && stepVar.init.arguments.length === 1 && stepVar.init.arguments[0].value === "|") {
-                            let whileNode = node.body[1]
-                            if (whileNode.test.type === "Literal" && whileNode.test.value) {
-                                let whileBody = whileNode.body.body
-                                if (whileBody[0].type === "SwitchStatement") {
-                                    let switchNode = whileBody[0]
-                                    let discriminant = switchNode.discriminant
-                                    if (
-                                        discriminant && discriminant.type === "MemberExpression" &&
-                                        discriminant.object && discriminant.object.type === "Identifier" && discriminant.object.name === stepVar.id.name &&
-                                        discriminant.property && discriminant.property.type === "UpdateExpression" && discriminant.property.operator === "++" &&
-                                        discriminant.property.argument.name === choiceVar.id.name
-                                    ) {
-                                        //生成调用顺序映射
-                                        let caseMap = {}
-                                        for (let caseNode of switchNode.cases) {
-                                            if (caseNode.test.type === "Literal") {
-                                                caseMap[caseNode.test.value] = caseNode.consequent.filter(x => x.type !== "ContinueStatement" && x.type !== "BreakStatement")
-                                            } else {
-                                                throw new Error("异常case表达:" + escodegen.generate(caseNode))
-                                            }
+                            whileNode = node.body[1]
+                        }
+                    }
+                }
+                if (stepVar && choiceVar && object) {
+                    if (stepVar.type === "VariableDeclarator" && stepVar.init && stepVar.init.type === "CallExpression" && stepVar.init.callee.type === "MemberExpression") {
+                        if (whileNode.test.type === "Literal" && whileNode.test.value) {
+                            let whileBody = whileNode.body.body
+                            if (whileBody[0].type === "SwitchStatement") {
+                                let switchNode = whileBody[0]
+                                let discriminant = switchNode.discriminant
+                                if (
+                                    discriminant && discriminant.type === "MemberExpression" &&
+                                    discriminant.object && discriminant.object.type === "Identifier" && discriminant.object.name === stepVar.id.name &&
+                                    discriminant.property && discriminant.property.type === "UpdateExpression" && discriminant.property.operator === "++" &&
+                                    discriminant.property.argument.name === choiceVar.id.name
+                                ) {
+                                    //生成调用顺序映射
+                                    let caseMap = {}
+                                    for (let caseNode of switchNode.cases) {
+                                        if (caseNode.test.type === "Literal") {
+                                            caseMap[caseNode.test.value] = caseNode.consequent.filter(x => x.type !== "ContinueStatement" && x.type !== "BreakStatement")
+                                        } else {
+                                            throw new Error("异常case表达:" + escodegen.generate(caseNode))
                                         }
-                                        //重排调用顺序
-                                        let newBody = []
-                                        for (let step of object.value.split("|")) {
-                                            for (let s of caseMap[step]) {
-                                                newBody.push(s)
-                                            }
+                                    }
+                                    //重排调用顺序
+                                    let newBody = []
+                                    for (let step of object.value.split("|")) {
+                                        for (let s of caseMap[step]) {
+                                            newBody.push(s)
                                         }
-                                        count += 1
-                                        return {
-                                            type: "BlockStatement",
-                                            body: newBody
-                                        }
+                                    }
+                                    count += 1
+                                    return {
+                                        type: "BlockStatement",
+                                        body: newBody
                                     }
                                 }
                             }
@@ -622,7 +657,7 @@ function changeObjectFunctionCall(ast) {
         leave(node) {
             if (node.type === "MemberExpression") {
                 let pt = node.property
-                if (pt && pt.type === "Literal" && typeof pt.value === "string") {
+                if (pt && pt.type === "Literal" && typeof pt.value === "string" && /^([^\x00-\xff]|[a-zA-Z_$])([^\x00-\xff]|[a-zA-Z0-9_$])*$/.test(pt.value)) {
                     node.property = {
                         "type": "Identifier",
                         "name": pt.value
@@ -640,7 +675,7 @@ function changeObjectFunctionCall(ast) {
  * @param codeStr 代码内容
  */
 function decryptCode(codeStr) {
-    let {ast, vmContext} = clearEncryptStrCode(code_context)
+    let {ast, vmContext, code} = clearEncryptStrCode(code_context)
     clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext)
     clearFunctionExecutionStepConfusion(ast)
 }
@@ -648,7 +683,7 @@ function decryptCode(codeStr) {
 let vm = require("vm")
 let fs = require("fs")
 // 加密文件路径
-let FILE_NAME = "sample/jsjiami.com.v5_high.js"
+let FILE_NAME = "test.js"
 // 用于存储第一步解码加密字符串结果，可靠性高
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
 // 用于存储第二步解码加密操作以及死代码结果,可靠性低
