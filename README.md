@@ -49,3 +49,7 @@
 * clear_encrypt_str.js：解除全局字符加密
 * clear_encrypt_operate.js：解除运算及调用加密、清理死代码(if-else)
 * clear_function_execution_step_confusion.js：去除函数执行步骤混淆
+
+## 参考
+本项目参考了下面的项目：
+1. [NXY666/Jsjiemi](https://github.com/NXY666/Jsjiemi.git)
