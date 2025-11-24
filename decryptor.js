@@ -3,6 +3,10 @@ function writeJs(data, path) {
     fs.writeFileSync(path, data)
 }
 
+function readJs(path) {
+    return fs.readFileSync(path).toString()
+}
+
 /**
  * 通过父级Key和当前属性值获取操作映射
  * @param operateMap 操作映射表
@@ -196,8 +200,8 @@ function clearIfStatement(ifStatementNode, vmContext) {
  */
 function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
     //判断变量是否只有一个
-    if (decryptVariableNode.declarations && decryptVariableNode.declarations.length === 1) {
-        let declarations = decryptVariableNode.declarations[0]
+    if (decryptVariableNode.declarations && decryptVariableNode.declarations.length > 1) {
+        let declarations = decryptVariableNode.declarations[1]
         let key = declarations.id.name
         // 判断定义的变量是否是Object类型
         if (declarations.init) {
@@ -213,7 +217,9 @@ function buildOperateMapFromVariable(parentVariableMap, decryptVariableNode) {
                         if (v) {
                             setOperateToMap(parentVariableMap, key, property.key.value, v)
                         } else {
-                            console.warn("FunctionExpression 不受支持：", escodegen.generate(property), property)
+                            console.clear();
+                            console.warn("FunctionExpression 不受支持：", escodegen.generate(property))
+                            console.log("node ===> ", property)
                         }
                     } else if (property.value.type === "MemberExpression") {
                         let ob = property.value.object
@@ -299,35 +305,218 @@ function virtualGlobalEval(context, script) {
 function findStrEncryptionFunction(codeStr) {
     console.log("----------------------开始解析字符串解密函数----------------------")
     let ast = getAst(codeStr)
+    writeJs(escodegen.generate(ast), "org.js");
     let program = ast.body
+    
     program = program.filter(x => x.type !== "EmptyStatement")
+    let decStrFuncName = "";
+    let decStrFuncNameV2 = "";
+    let decStrFuncDepNameV2 = "";
+    let decFuncCodeBody = [];
+    let decStrDepFuncName = "";
+    let foundNode = false;
+    let foundNodeV2 = false;
+    let foundNodeV2Dep = false;
+    for(let i=0; i < ast.body.length; i++) {
+        let node = ast.body[i];
+        if(!foundNode) {
+            try {
+                // 创建解密函数体
+                decFuncCodeBody.push(node);
+                // 解密依赖字符串生成函数
+                decStrDepFuncName = node.expression.left.expressions[0].arguments[2].name;
+                // 解密函数
+                decStrFuncName = node.expression.left.expressions[0].callee.body.body[0].argument.expressions[3].callee.body.body[0].declarations[0].init.name;
+                if(decStrDepFuncName && decStrFuncName) {
+                    foundNode = true;
+                }
+            } catch(e) {
+            }
+        }
+        if(!foundNodeV2) {
+            try{
+                if(node.type==="VariableDeclaration" && 
+                    node.kind === "const" &&
+                    node.declarations.length === 1 &&
+                    node.declarations[0].init &&
+                    node.declarations[0].init.type === "Identifier" &&
+                    node.declarations[0].id.type === "Identifier"
+                ) {
+                      decStrFuncNameV2=node.declarations[0].init.name;
+                      foundNodeV2 = true;
+                }
+            } catch(e) {}
+        }
+        if(!foundNodeV2Dep) {
+            try{
+                if(node.type === "FunctionDeclaration" && node.id.name === decStrFuncNameV2) {
+                    if(node.body.body[0].declarations[2].type == "VariableDeclarator" &&
+                    node.body.body[0].declarations[2].init.type == "CallExpression" &&
+                    node.body.body[0].declarations[2].init.arguments[0].type == "Identifier"
+                    ) {
+                        decStrFuncDepNameV2=node.body.body[0].declarations[2].init.arguments[0].name;
+                        if(decStrFuncDepNameV2) {
+                            foundNodeV2Dep = true;
+                        }
+                    }
+                }
+            }catch(e){}
+        }
+    }
+    if(!foundNode) {
+        throw new Error("没有找到字符串加密函数！")
+    }
+    if(!foundNodeV2) {
+        throw new Error("没有找到字符串加密函数V2！")
+    }
+    if(!foundNodeV2Dep) {
+        throw new Error("没有找到字符串加密函数V2依赖函数！")
+    }
+    console.log("找到解密函数 ==> ", decStrFuncName, ", 找到解密依赖函数 ==> ", decStrDepFuncName);
+    console.log("---------------------- 开始查找解密函数体 ----------------------")
+    foundNode = 0;
+    let encCode = [];
+    ast.body.forEach(node=>{
+        // 查找解密函数节点
+        if(node.type === 'FunctionDeclaration') {
+            if(node.id.name === decStrFuncName) {
+                foundNode = foundNode | 1;
+            } else if(node.id.name === decStrDepFuncName) {
+                foundNode = foundNode | 2;
+            } else if(node.id.name === decStrFuncNameV2) {
+                foundNode = foundNode | 4;
+            } else if(node.id.name === decStrFuncDepNameV2) {
+                foundNode = foundNode | 8;
+            } else {
+                encCode.push(node);
+                return;
+            }
+            // 防止重复添加
+            if(!decFuncCodeBody.includes(node)) {
+                decFuncCodeBody.push(node);
+            }
+            return
+        } else if(!decFuncCodeBody.includes(node)) {
+            encCode.push(node);
+        }
+    });
+    let errors = [
+        "没有找到解密函数节点！", 
+        "没有找到解密函数依赖节点！", 
+        "没有找到解密函数V2节点！", 
+        "没有找到解密函数V2依赖节点！"
+    ];
+    for(let i=0; i < 4; i++) {
+        if((1 << i) & foundNode == 0) {
+            throw new Error(errors[i])    
+        }
+    }
+    let decFuncAst = builders.program(decFuncCodeBody);
+    let decFuncCode = escodegen.generate(decFuncAst);
+    writeJs(decFuncCode, "decFuncCode.js");
+    writeJs(escodegen.generate(builders.program(encCode)), "encCode.js");
+    ast.body = encCode
     let vmContext = vm.createContext()
     if (config.vmInitScript) {
         virtualGlobalEval(vmContext, config.vmInitScript)
     }
-    let name = null
-    for (let i = 0; i < 3; ++i) {
-        let p = program.shift(0)
-        virtualGlobalEval(vmContext, codeStr.substring(p.start, p.end))
-        if (i === 2) {
-            if (p.type === "FunctionDeclaration") {
-                name = p.id.name
-            }
-            if (p.type === "VariableDeclaration") {
-                name = p.declarations[0].id.name
+    virtualGlobalEval(vmContext, decFuncCode);
+    return [decStrFuncName, decStrFuncNameV2, ast, vmContext]
+}
+
+function checkAndGetNewDecName(node, names) {
+    if(node.type === "VariableDeclarator"
+        && node.init
+        && names.has(node.init.name)
+    ) {
+        names.add(node.id.name)
+        return true;
+    }
+    return false;
+}
+
+function evalDecryptStr(vmContext, node, name) {
+    let oldName = node.callee.name;
+    let code = "";
+    try {
+        node.callee.name = name;
+        code = escodegen.generate(node)
+        let result = virtualGlobalEval(vmContext, code)
+        if (typeof result === 'string') {
+            return builders.literal(result)
+        }
+    } catch (e) {
+        console.warn("无评估代码片段：", code)
+    }
+    node.callee.name = oldName;
+}
+
+function clearEncryptStrCodeV2Handler(vmCtx, node, name, names) {
+    if (node.type === "CallExpression"
+        && node.callee
+        && node.callee.type === "Identifier"
+    ) {
+        if(node.arguments.length == 1
+            && node.arguments[0].type == "Literal") {
+            if(names.has(node.callee.name)) {
+                node = evalDecryptStr(vmCtx, node, name)
+                if(node){
+                    return node;
+                }
+            } else {
+                console.log("V2解密不支持 ==> ", escodegen.generate(node))
             }
         }
     }
-    if (!name) {
-        throw new Error("没有找到字符串加密函数！")
+}
+
+function clearEncryptStrCodeHandler(vmCtx, node, name, names) {
+    if (node.type === "CallExpression"
+        && node.callee
+        && node.callee.type === "Identifier"
+    ) {
+        if(node.arguments.length == 2 
+            && node.arguments[0].type == "Literal"
+            && node.arguments[1].type == "Literal") {
+            if(names.has(node.callee.name)) {
+                return evalDecryptStr(vmCtx, node, name)
+            } else {
+                console.log("V1解密不支持 ===> ", escodegen.generate(node))
+            }
+        }
     }
-    console.log(">>>>>>>>>>>>>>>>>>>>>>>已找到解密函数：", name)
-    ast.body = program
-    return {
-        name,
-        ast,
-        vmContext
-    }
+}
+
+function clearEncryptStrCodeWalker(ast, evalFunc, namesStack) {
+    let count = 0;
+    ast = estraverse.replace(ast, {
+        enter(node){
+            if (node.type === "BlockStatement") {
+                // 记录局部变量作用域堆栈
+                let currentName = new Set(namesStack[namesStack.length -1]);
+                namesStack.push(currentName);
+            } else if(node.type === "VariableDeclarator") {
+                // 处理解密函数映射（不能删除变量定义，防止操作过程加密，而无法追踪解密）
+                checkAndGetNewDecName(node, namesStack[namesStack.length-1]);
+            }
+            return node;
+        },
+        leave(node){
+            if (node.type === "BlockStatement") {
+                namesStack.pop();
+            } else if(node.type === "VariableDeclaration" && node.declarations.length == 0) {
+                return estraverse.VisitorOption.Remove;
+            } else {
+                let newNode = evalFunc(node, namesStack[namesStack.length-1]);
+                if(newNode) {
+                    count++;
+                    return newNode;
+                } 
+            }
+            return node;
+        }
+    });
+    return [ast, count];
 }
 
 /**
@@ -335,34 +524,19 @@ function findStrEncryptionFunction(codeStr) {
  * @returns {{ast, vmContext: Context}} 解密后的AST节点
  */
 function clearEncryptStrCode(codeStr) {
-    let {name, ast, vmContext} = findStrEncryptionFunction(codeStr)
+    let [decStrFuncName, decStrFuncNameV2, ast, vmContext] = findStrEncryptionFunction(codeStr)
     console.log("----------------------开始清除加密字符串----------------------")
-    let count = 0
-    estraverse.replace(ast, {
-        leave(node) {
-            if (node.type === 'BinaryExpression') {
-                if (node.left && node.left.type === 'Literal' && node.right && node.right.type === 'Literal' && node.operator === '+') {
-                    try {
-                        let code = escodegen.generate(node)
-                        let result = virtualGlobalEval(vmContext, code)
-                        if (typeof result === 'string') {
-                            return builders.literal(result)
-                        }
-                    } catch (e) {
-                        console.warn("无评估代码片段：", node)
-                    }
-                }
-            } else if (node.type === "CallExpression" && node.callee.name === name) {
-                let o = virtualGlobalEval(vmContext, escodegen.generate(node))
-                count += 1
-                return builders.literal(o)
-            }
-            return node
-        }
-    })
-    codeStr = escodegen.generate(changeObjectFunctionCall(ast))
+    let count = 0;
+    let [ast1, count1] = clearEncryptStrCodeWalker(ast, (node, names)=>{
+        return clearEncryptStrCodeHandler(vmContext, node, decStrFuncName, names);
+    }, [new Set([decStrFuncName])]);
+    console.log(">>>>>>>>>>>>>>>>>>>>>>>清除V1加密字符串结束,共计", count1, "处!")
+    let [ast2, count2] = clearEncryptStrCodeWalker(ast1, (node, names)=>{
+        return clearEncryptStrCodeV2Handler(vmContext, node, decStrFuncNameV2, names);
+    }, [new Set([decStrFuncNameV2])]);
+    console.log(">>>>>>>>>>>>>>>>>>>>>>>清除V2加密字符串结束,共计", count2, "处!")
+    codeStr = escodegen.generate(ast2)
     writeJs(codeStr, CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME)
-    console.log(">>>>>>>>>>>>>>>>>>>>>>>清除加密字符串结束,共计", count, "处!")
     return {ast, vmContext, code: codeStr}
 }
 
@@ -426,7 +600,6 @@ function clearBaseOperateCallHandler(operateMap, callExpressionNode) {
             for (let arg of args) {
                 if (arg) {
                     if (arg.type === "CallExpression" || arg.type === "MemberExpression") {
-                        // console.log("使用递归！")
                         let i = clearBaseOperateCallHandler(operateMap, arg)
                         if (i) {
                             arguments.push(i)
@@ -532,17 +705,6 @@ function clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext) {
             }
         })
     }
-    //用于简化重复嵌套代码块
-    // estraverse.replace(ast, {
-    //     enter(node) {
-    //         if (node.type === "BlockStatement") {
-    //             while (node.body && node.body.length === 1 && node.body[0].type === "BlockStatement") {
-    //                 node = node.body[0]
-    //             }
-    //             return node
-    //         }
-    //     }
-    // })
     console.log(">>>>>>>>>>>>>>>>>>>>>>>清除运算符加密结束,共计清除:",
         '字面量混淆:', literalCount, '处,',
         `调用加密:`, callCount, `处,`,
@@ -668,19 +830,27 @@ function changeObjectFunctionCall(ast) {
 }
 
 /**
+ * 清除数值映射
+ * @param {*} ast 
+ */
+function clearDataMapping(ast) {
+    clearDataMappingHandler(ast, {});
+}
+
+/**
  * 解密代码
  * @param codeStr 代码内容
  */
 function decryptCode(codeStr) {
     let {ast, vmContext, code} = clearEncryptStrCode(code_context)
-    clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext)
-    clearFunctionExecutionStepConfusion(ast)
+    // ast = clearBaseOperateEncryptCodeAndUnreachableCode(ast, vmContext)
+    // clearFunctionExecutionStepConfusion(ast)
 }
 
 let vm = require("vm")
 let fs = require("fs")
 // 加密文件路径
-let FILE_NAME = "sample/jsjiami.com.v6_high.js"
+let FILE_NAME = "sample/jsjiami.com.v7.js"
 // 用于存储第一步解码加密字符串结果，可靠性高
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
 // 用于存储第二步解码加密操作以及死代码结果,可靠性低
@@ -691,16 +861,18 @@ let acorn = require("acorn")
 let escodegen = require("escodegen")
 let estraverse = require("estraverse")
 let {builders} = require("ast-types")
-let code_context = fs.readFileSync(FILE_NAME).toString()
+const { exit } = require("process")
+const { count } = require("console")
+let code_context = readJs(FILE_NAME)
 let config = {
-    clearIf: true,//开启清除无效if else语句
-    clearVar: true,//开启清除无效操作映射变量
+    clearIf: false,//开启清除无效if else语句
+    clearVar: false,//开启清除无效操作映射变量
     vmInitScript: `
     var document = {
         domain: ''
     }
     var Host = ''
-    var Domain = ''
+    var Domain = ()=>{}
     `// 向vm context初始化时执行的脚本,用于向环境注入变量
 }
 
