@@ -26,7 +26,7 @@ function getAst(codeContext) {
  * @returns {any}
  */
 function virtualGlobalEval(context, script) {
-    return vm.runInContext(script, context);
+    return context.run(script);
 }
 
 /**
@@ -38,9 +38,6 @@ function findStrEncryptionFunctionV1(codeStr) {
     console.log("----------------------开始解析字符串V1解密函数----------------------")
     let ast = getAst(codeStr)
     writeJs(escodegen.generate(ast), "org.js");
-    let program = ast.body
-    
-    program = program.filter(x => x.type !== "EmptyStatement")
     let decStrFuncName = "";
     let decFuncCodeBody = [];
     let decStrDepFuncName = "";
@@ -67,7 +64,6 @@ function findStrEncryptionFunctionV1(codeStr) {
     console.log("找到V1解密函数 ==> ", decStrFuncName, ", 找到V1解密依赖函数 ==> ", decStrDepFuncName);
     console.log("---------------------- 开始查找V1解密函数体 ----------------------")
     foundNode = 0;
-    let encCode = [];
     ast.body.forEach(node=>{
         // 查找解密函数节点
         if(node.type === 'FunctionDeclaration') {
@@ -76,16 +72,12 @@ function findStrEncryptionFunctionV1(codeStr) {
             } else if(node.id.name === decStrDepFuncName) {
                 foundNode = foundNode | 2;
             } else {
-                encCode.push(node);
                 return;
             }
             // 防止重复添加
             if(!decFuncCodeBody.includes(node)) {
                 decFuncCodeBody.push(node);
             }
-            return
-        } else if(!decFuncCodeBody.includes(node)) {
-            encCode.push(node);
         }
     });
     let errors = [
@@ -100,9 +92,10 @@ function findStrEncryptionFunctionV1(codeStr) {
     let decFuncAst = builders.program(decFuncCodeBody);
     let decFuncCode = escodegen.generate(decFuncAst);
     writeJs(decFuncCode, "decFuncCode.js");
-    writeJs(escodegen.generate(builders.program(encCode)), "encCode.js");
-    ast.body = encCode
-    let vmContext = vm.createContext()
+    const vmContext = new VM({
+        timeout: 60000,          // 执行超时时间（毫秒）
+        allowAsync: false,     // 是否允许异步操作
+    });
     if (config.vmInitScript) {
         virtualGlobalEval(vmContext, config.vmInitScript)
     }
@@ -338,8 +331,20 @@ function mappingLiteral(value) {
 function mappingLogicalExpression(value) {
     if(value.type === "LogicalExpression") {
         return {
-            type: OpEnum.Literal,
+            type: OpEnum.LogicalExpression,
             value: value.operator
+        }
+    }
+
+    if (value.type === "FunctionExpression" &&
+        value.body.type === "BlockStatement" &&
+        value.body.body.length === 1 &&
+        value.body.body[0].type === "ReturnStatement" &&
+        value.body.body[0].argument.type === "LogicalExpression"
+    ) {
+        return {
+            type: OpEnum.LogicalExpression,
+            value: value.body.body[0].argument.operator
         }
     }
 }
@@ -445,8 +450,8 @@ function opMapFactory(node, op) {
     } else if(op.type == OpEnum.LogicalExpression) {
         if(node.arguments && node.arguments.length === 2) {
             return builders.logicalExpression(
-                op.value, 
-                node.arguments[0], 
+                op.value,
+                node.arguments[0],
                 node.arguments[1]);
         }
     }
@@ -760,10 +765,10 @@ function decryptCode(codeStr) {
     ast = clearUnreachableVariable(ast);
 }
 
-let vm = require("vm")
+let { VM } = require('@flowiseai/nodevm');
 let fs = require("fs")
 // 加密文件路径
-let FILE_NAME = "sample/jsjiami.com.v7.js"
+let FILE_NAME = "sample/jsjiami.com.v7_high.js"
 // let FILE_NAME = "sample/v7.simple.js"
 // 解码加密字符串结果，可靠性高
 let CLEAR_ENCRYPT_STR_OUTPUT_FILE_NAME = "clear_encrypt_str.js"
